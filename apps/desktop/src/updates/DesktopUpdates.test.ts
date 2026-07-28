@@ -20,9 +20,11 @@ import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as DesktopUpdateRelaunch from "./DesktopUpdateRelaunch.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 
 interface UpdatesHarnessOptions {
+  readonly platform?: NodeJS.Platform;
   readonly checkForUpdates?: Effect.Effect<
     void,
     ElectronUpdater.ElectronUpdaterCheckForUpdatesError
@@ -36,9 +38,14 @@ interface UpdatesHarnessOptions {
 const flushCallbacks = Effect.yieldNow;
 
 function makeHarness(options: UpdatesHarnessOptions = {}) {
+  const platform = options.platform ?? "win32";
+  const platformEnv = platform === "linux" ? { APPIMAGE: "/tmp/T3-Code.AppImage" } : {};
   let checkCount = 0;
+  let destroyAllCount = 0;
+  let quitAndInstallCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
+  const autoInstallOnAppQuitValues: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -66,7 +73,10 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         feedUrls.push(options);
       }),
     setAutoDownload: () => Effect.void,
-    setAutoInstallOnAppQuit: () => Effect.void,
+    setAutoInstallOnAppQuit: (value) =>
+      Effect.sync(() => {
+        autoInstallOnAppQuitValues.push(value);
+      }),
     setChannel: () => Effect.void,
     setAllowPrerelease: () => Effect.void,
     allowDowngrade: Effect.sync(() => allowDowngrade),
@@ -83,7 +93,10 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
     downloadUpdate: Effect.void,
-    quitAndInstall: () => Effect.void,
+    quitAndInstall: () =>
+      Effect.sync(() => {
+        quitAndInstallCount += 1;
+      }),
     on: (eventName, listener) =>
       Effect.acquireRelease(
         Effect.sync(() => {
@@ -92,6 +105,16 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         () =>
           Effect.sync(() => {
             removeListener(eventName, listener as unknown as (...args: readonly unknown[]) => void);
+          }),
+      ).pipe(Effect.asVoid),
+    onNativeUpdateDownloaded: (listener) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          addListener("native-update-downloaded", listener);
+        }),
+        () =>
+          Effect.sync(() => {
+            removeListener("native-update-downloaded", listener);
           }),
       ).pipe(Effect.asVoid),
   } satisfies ElectronUpdater.ElectronUpdater["Service"]);
@@ -108,7 +131,9 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         sentStates.push(state as DesktopUpdateState);
       }),
-    destroyAll: Effect.void,
+    destroyAll: Effect.sync(() => {
+      destroyAllCount += 1;
+    }),
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
@@ -132,7 +157,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
     homeDirectory: `/tmp/t3-desktop-updates-home-${process.pid}`,
-    platform: "darwin",
+    platform,
     processArch: "x64",
     appVersion: "1.2.3",
     appPath: "/repo",
@@ -147,6 +172,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
           T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
           T3CODE_DESKTOP_MOCK_UPDATES: "true",
           T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT: "4141",
+          ...platformEnv,
           ...options.env,
         }),
       ),
@@ -181,6 +207,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
         T3CODE_DESKTOP_MOCK_UPDATES: "true",
         T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT: "4141",
+        ...platformEnv,
         ...options.env,
       }),
     ),
@@ -190,7 +217,9 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   return {
     layer,
+    autoInstallOnAppQuitValues: () => autoInstallOnAppQuitValues,
     checkCount: () => checkCount,
+    destroyAllCount: () => destroyAllCount,
     feedUrls: () => feedUrls,
     fullChangelog: () => fullChangelog,
     listenerCount: () =>
@@ -198,6 +227,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
         (total, eventListeners) => total + eventListeners.size,
         0,
       ),
+    quitAndInstallCount: () => quitAndInstallCount,
     sentStates,
     emit: (eventName: string, payload?: unknown) => {
       for (const listener of listeners.get(eventName) ?? []) {
@@ -273,6 +303,90 @@ describe("DesktopUpdates", () => {
       assert.equal(harness.listenerCount(), 0);
     }).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect("enables native pre-staging only on macOS", () =>
+    Effect.gen(function* () {
+      for (const [platform, expected] of [
+        ["darwin", true],
+        ["win32", false],
+        ["linux", false],
+      ] as const) {
+        const harness = makeHarness({ platform });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const updates = yield* DesktopUpdates.DesktopUpdates;
+            yield* updates.configure;
+            assert.deepEqual(harness.autoInstallOnAppQuitValues(), [expected]);
+            assert.equal(harness.listenerCount(), platform === "darwin" ? 7 : 6);
+          }),
+        ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+      }
+    }),
+  );
+
+  it.effect("withholds the macOS restart action until native staging is complete", () => {
+    const harness = makeHarness({ platform: "darwin" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
+        yield* flushCallbacks;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const preparingState = yield* updates.getState;
+        assert.equal(preparingState.status, "downloading");
+        assert.equal(preparingState.downloadPercent, 100);
+        assert.equal(preparingState.message, "Preparing update…");
+        assert.isUndefined(downloadFiber.pollUnsafe());
+
+        harness.emit("native-update-downloaded");
+        const result = yield* Fiber.join(downloadFiber);
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+
+        const readyState = yield* updates.getState;
+        assert.equal(readyState.status, "downloaded");
+        assert.equal(readyState.downloadedVersion, "1.2.4");
+        assert.isNull(readyState.message);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("only force-destroys windows for the Windows installer", () =>
+    Effect.gen(function* () {
+      for (const platform of ["darwin", "win32", "linux"] as const) {
+        const harness = makeHarness({ platform });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const updates = yield* DesktopUpdates.DesktopUpdates;
+            yield* updates.configure;
+            harness.emit("update-downloaded", { version: "1.2.4" });
+            if (platform === "darwin") {
+              yield* flushCallbacks;
+              harness.emit("native-update-downloaded");
+            }
+            yield* flushCallbacks;
+
+            const result = yield* updates.install;
+            assert.isTrue(result.accepted);
+            assert.equal(
+              result.state.message,
+              "Preparing update… T3 Code will restart automatically.",
+            );
+            assert.equal(harness.quitAndInstallCount(), 1);
+            assert.equal(harness.destroyAllCount(), platform === "win32" ? 1 : 0);
+            yield* DesktopUpdateRelaunch.clear;
+          }),
+        ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+      }
+    }),
+  );
 
   it.effect("updates and broadcasts state from updater events", () => {
     const harness = makeHarness();
