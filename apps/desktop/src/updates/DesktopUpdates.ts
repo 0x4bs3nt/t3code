@@ -757,28 +757,38 @@ export const make = Effect.gen(function* () {
     yield* decodeUpdateInfo(raw).pipe(
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
-          const state = yield* Ref.get(updateStateRef);
           if (environment.platform === "darwin") {
-            if (state.status === "downloaded") {
+            yield* Ref.set(nativePreparationVersionRef, Option.some(info.version));
+            const transitionedToPreparing = yield* Ref.modify(updateStateRef, (current) => {
+              if (current.status === "downloaded") {
+                return [false, current] as const;
+              }
+              return [
+                true,
+                {
+                  ...current,
+                  status: "downloading",
+                  downloadPercent: 100,
+                  message: "Preparing update…",
+                  errorContext: null,
+                  canRetry: false,
+                },
+              ] as const;
+            });
+            if (!transitionedToPreparing) {
+              yield* Ref.set(nativePreparationVersionRef, Option.none());
               yield* logUpdaterInfo("ignoring duplicate macOS download completion event", {
                 version: info.version,
               });
               return;
             }
-            yield* Ref.set(nativePreparationVersionRef, Option.some(info.version));
-            yield* setState({
-              ...state,
-              status: "downloading",
-              downloadPercent: 100,
-              message: "Preparing update…",
-              errorContext: null,
-              canRetry: false,
-            });
+            yield* emitState;
             yield* logUpdaterInfo("download complete; preparing native macOS update", {
               version: info.version,
             });
             return;
           }
+          const state = yield* Ref.get(updateStateRef);
           yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
           yield* logUpdaterInfo("update downloaded", { version: info.version });
         }),

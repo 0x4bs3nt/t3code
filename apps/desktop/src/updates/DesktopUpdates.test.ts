@@ -392,6 +392,34 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("keeps the macOS update ready when completion callbacks race", () => {
+    const harness = makeHarness({ platform: "darwin" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
+        yield* flushCallbacks;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        harness.emit("native-update-downloaded");
+
+        const result = yield* Fiber.join(downloadFiber);
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+        yield* flushCallbacks;
+
+        const readyState = yield* updates.getState;
+        assert.equal(readyState.status, "downloaded");
+        assert.equal(readyState.downloadedVersion, "1.2.4");
+        assert.isNull(readyState.message);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("restores download progress after a stray no-update event", () => {
     const harness = makeHarness({ platform: "darwin" });
 
