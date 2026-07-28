@@ -392,6 +392,43 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("restores download progress after a stray no-update event", () => {
+    const harness = makeHarness({ platform: "darwin" });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
+        yield* flushCallbacks;
+        harness.emit("update-not-available");
+        yield* flushCallbacks;
+
+        const noUpdateState = yield* updates.getState;
+        assert.equal(noUpdateState.status, "up-to-date");
+        assert.isNull(noUpdateState.downloadPercent);
+
+        harness.emit("download-progress", { percent: 42 });
+        yield* flushCallbacks;
+
+        const downloadingState = yield* updates.getState;
+        assert.equal(downloadingState.status, "downloading");
+        assert.equal(downloadingState.downloadPercent, 42);
+        assert.isNull(downloadingState.message);
+
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+        harness.emit("native-update-downloaded");
+        const result = yield* Fiber.join(downloadFiber);
+        assert.isTrue(result.accepted);
+        assert.isTrue(result.completed);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect(
     "fails macOS native preparation instead of hanging when no version is available",
     () => {

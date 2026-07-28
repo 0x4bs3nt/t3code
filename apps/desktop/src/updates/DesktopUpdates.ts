@@ -719,7 +719,8 @@ export const make = Effect.gen(function* () {
         Effect.fn("desktop.updates.applyDownloadProgress")(function* (progress) {
           const state = yield* Ref.get(updateStateRef);
           const percent = Math.floor(progress.percent);
-          if (state.status !== "downloading") {
+          const downloadInFlight = yield* Ref.get(updateDownloadInFlightRef);
+          if (!downloadInFlight || state.status === "downloaded") {
             return;
           }
           const nativePreparationVersion = yield* Ref.get(nativePreparationVersionRef);
