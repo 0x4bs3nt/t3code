@@ -675,8 +675,7 @@ export const make = Effect.gen(function* () {
       cause,
     });
     if (yield* Ref.get(updateInstallInFlightRef)) {
-      yield* Ref.set(updateInstallInFlightRef, false);
-      yield* Ref.set(desktopState.quitting, false);
+      yield* resetInstallAction;
       yield* updateState((current) =>
         reduceDesktopUpdateStateOnInstallFailure(current, error.message),
       );
@@ -720,6 +719,13 @@ export const make = Effect.gen(function* () {
         Effect.fn("desktop.updates.applyDownloadProgress")(function* (progress) {
           const state = yield* Ref.get(updateStateRef);
           const percent = Math.floor(progress.percent);
+          if (state.status !== "downloading") {
+            return;
+          }
+          const nativePreparationVersion = yield* Ref.get(nativePreparationVersionRef);
+          if (Option.isSome(nativePreparationVersion)) {
+            return;
+          }
           if (shouldBroadcastDownloadProgress(state, progress.percent) || state.message !== null) {
             yield* setState(reduceDesktopUpdateStateOnDownloadProgress(state, progress.percent));
           }
@@ -752,6 +758,12 @@ export const make = Effect.gen(function* () {
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
           if (environment.platform === "darwin") {
+            if (state.status === "downloaded") {
+              yield* logUpdaterInfo("ignoring duplicate macOS download completion event", {
+                version: info.version,
+              });
+              return;
+            }
             yield* Ref.set(nativePreparationVersionRef, Option.some(info.version));
             yield* setState({
               ...state,
@@ -789,8 +801,16 @@ export const make = Effect.gen(function* () {
       const pendingVersion = yield* Ref.get(nativePreparationVersionRef);
       const version = Option.getOrUndefined(pendingVersion) ?? state.availableVersion;
       if (version === null) {
+        const error = new DesktopUpdaterReportedError({
+          operation: "download",
+          cause: new Error("Native macOS update became ready without a version."),
+        });
+        const nativePreparationDeferred = yield* Ref.get(nativePreparationDeferredRef);
+        if (Option.isSome(nativePreparationDeferred)) {
+          yield* Deferred.fail(nativePreparationDeferred.value, error);
+        }
         yield* logUpdaterWarning(
-          "native macOS update became ready without an available update version; ignoring event",
+          "native macOS update became ready without an available update version",
         );
         return;
       }

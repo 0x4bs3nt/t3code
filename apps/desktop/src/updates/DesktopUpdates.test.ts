@@ -49,6 +49,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
+  const stateWaiters = new Set<(state: DesktopUpdateState) => void>();
 
   const addListener = (eventName: string, listener: (...args: readonly unknown[]) => void) => {
     const eventListeners = listeners.get(eventName) ?? new Set();
@@ -129,7 +130,11 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     reveal: () => Effect.void,
     sendAll: (_channel, state) =>
       Effect.sync(() => {
-        sentStates.push(state as DesktopUpdateState);
+        const updateState = state as DesktopUpdateState;
+        sentStates.push(updateState);
+        for (const waiter of stateWaiters) {
+          waiter(updateState);
+        }
       }),
     destroyAll: Effect.sync(() => {
       destroyAllCount += 1;
@@ -218,6 +223,22 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   return {
     layer,
     autoInstallOnAppQuitValues: () => autoInstallOnAppQuitValues,
+    awaitState: (predicate: (state: DesktopUpdateState) => boolean) =>
+      Effect.promise(() => {
+        if (sentStates.some(predicate)) {
+          return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+          const waiter = (state: DesktopUpdateState) => {
+            if (!predicate(state)) {
+              return;
+            }
+            stateWaiters.delete(waiter);
+            resolve();
+          };
+          stateWaiters.add(waiter);
+        });
+      }),
     checkCount: () => checkCount,
     destroyAllCount: () => destroyAllCount,
     feedUrls: () => feedUrls,
@@ -345,6 +366,12 @@ describe("DesktopUpdates", () => {
         assert.equal(preparingState.message, "Preparing update…");
         assert.isUndefined(downloadFiber.pollUnsafe());
 
+        harness.emit("download-progress", { percent: 100 });
+        yield* flushCallbacks;
+        const stateAfterLateProgress = yield* updates.getState;
+        assert.equal(stateAfterLateProgress.status, "downloading");
+        assert.equal(stateAfterLateProgress.message, "Preparing update…");
+
         harness.emit("native-update-downloaded");
         const result = yield* Fiber.join(downloadFiber);
         assert.isTrue(result.accepted);
@@ -354,9 +381,48 @@ describe("DesktopUpdates", () => {
         assert.equal(readyState.status, "downloaded");
         assert.equal(readyState.downloadedVersion, "1.2.4");
         assert.isNull(readyState.message);
+
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+        const stateAfterDuplicateCompletion = yield* updates.getState;
+        assert.equal(stateAfterDuplicateCompletion.status, "downloaded");
+        assert.equal(stateAfterDuplicateCompletion.downloadedVersion, "1.2.4");
+        assert.isNull(stateAfterDuplicateCompletion.message);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect(
+    "fails macOS native preparation instead of hanging when no version is available",
+    () => {
+      const harness = makeHarness({ platform: "darwin" });
+
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+          harness.emit("update-available", { version: "1.2.4" });
+          yield* flushCallbacks;
+
+          const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
+          yield* flushCallbacks;
+          harness.emit("update-not-available");
+          yield* flushCallbacks;
+          harness.emit("native-update-downloaded");
+
+          const result = yield* Fiber.join(downloadFiber);
+          assert.isTrue(result.accepted);
+          assert.isFalse(result.completed);
+          assert.equal(result.state.status, "error");
+          assert.equal(result.state.errorContext, "download");
+          assert.equal(
+            result.state.message,
+            "Desktop updater download operation reported an error.",
+          );
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 
   it.effect("only force-destroys windows for the Windows installer", () =>
     Effect.gen(function* () {
@@ -619,6 +685,35 @@ describe("DesktopUpdates", () => {
 
         const changedState = yield* updates.setChannel("nightly");
         assert.equal(changedState.channel, "nightly");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("clears the relaunch marker after an updater-reported install failure", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const installResult = yield* updates.install;
+        assert.isTrue(installResult.accepted);
+        assert.isTrue(yield* DesktopUpdateRelaunch.consume);
+        yield* DesktopUpdateRelaunch.mark;
+
+        harness.emit("error", new Error("native installer failed"));
+        yield* harness.awaitState((state) => state.errorContext === "install");
+
+        const failedState = yield* updates.getState;
+        assert.equal(failedState.status, "downloaded");
+        assert.equal(failedState.errorContext, "install");
+        assert.equal(failedState.message, "Desktop updater install operation reported an error.");
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.isFalse(yield* DesktopUpdateRelaunch.consume);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
