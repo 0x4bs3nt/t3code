@@ -689,9 +689,20 @@ export const make = Effect.gen(function* () {
 
   const showConnectingSplash = Effect.fn("desktop.window.showConnectingSplash")(
     function* (reason: ConnectingSplashReason) {
-      // Only when nothing is shown yet: no real window, no existing splash.
+      // Reuse an existing splash while allowing a more specific startup phase
+      // (such as WSL cold boot after an update relaunch) to refresh its copy.
       const existingSplash = yield* Ref.get(splashWindowRef);
-      if (Option.isSome(existingSplash)) return;
+      if (Option.isSome(existingSplash) && !existingSplash.value.isDestroyed()) {
+        const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+        void existingSplash.value.loadURL(
+          buildConnectingSplashDataUrl(shouldUseDarkColors, reason),
+        );
+        yield* logWindowInfo("connecting splash updated", { reason });
+        return;
+      }
+      if (Option.isSome(existingSplash)) {
+        yield* Ref.set(splashWindowRef, Option.none());
+      }
       const existingWindow = yield* electronWindow.currentMainOrFirst;
       if (Option.isSome(existingWindow)) return;
 

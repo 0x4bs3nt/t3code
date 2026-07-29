@@ -1019,6 +1019,28 @@ describe("DesktopWindow", () => {
     }),
   );
 
+  it.effect("updates an existing relaunch splash for WSL cold boot", () =>
+    Effect.gen(function* () {
+      const splash = makeFakeBrowserWindow();
+      const scenario = yield* makeSplashScenario([splash.window]);
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.showConnectingSplash("update-relaunch");
+        yield* desktopWindow.showConnectingSplash("wsl");
+      }).pipe(Effect.provide(scenario.layer));
+
+      assert.equal(yield* Ref.get(scenario.createCalls), 1);
+      assert.equal(splash.loadURL.mock.calls.length, 2);
+      const updatedSplashUrl = splash.loadURL.mock.calls.at(-1)?.[0];
+      assert.isDefined(updatedSplashUrl);
+      assert.include(
+        decodeURIComponent(updatedSplashUrl),
+        '<div class="label">Connecting to WSL…</div>',
+      );
+    }),
+  );
+
   it.effect(
     "retries opening the real main on activate when a failed post-readiness open left only the splash",
     () =>
