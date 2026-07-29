@@ -127,6 +127,17 @@ export class DesktopUpdaterReportedError extends Schema.TaggedErrorClass<Desktop
   }
 }
 
+export class DesktopUpdateNativePreparationError extends Schema.TaggedErrorClass<DesktopUpdateNativePreparationError>()(
+  "DesktopUpdateNativePreparationError",
+  {
+    stage: Schema.Literals(["resolve-version"]),
+  },
+) {
+  override get message(): string {
+    return "Native macOS update preparation completed without an update version.";
+  }
+}
+
 export class DesktopUpdateUnexpectedActionError extends Schema.TaggedErrorClass<DesktopUpdateUnexpectedActionError>()(
   "DesktopUpdateUnexpectedActionError",
   {
@@ -272,7 +283,9 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const nativePreparationDeferredRef = yield* Ref.make<
-    Option.Option<Deferred.Deferred<void, DesktopUpdaterReportedError>>
+    Option.Option<
+      Deferred.Deferred<void, DesktopUpdaterReportedError | DesktopUpdateNativePreparationError>
+    >
   >(Option.none());
   const nativePreparationVersionRef = yield* Ref.make<Option.Option<string>>(Option.none());
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
@@ -415,8 +428,18 @@ export const make = Effect.gen(function* () {
     yield* Ref.set(updateDownloadInFlightRef, true);
     const nativePreparationDeferred =
       environment.platform === "darwin"
-        ? Option.some(yield* Deferred.make<void, DesktopUpdaterReportedError>())
-        : Option.none<Deferred.Deferred<void, DesktopUpdaterReportedError>>();
+        ? Option.some(
+            yield* Deferred.make<
+              void,
+              DesktopUpdaterReportedError | DesktopUpdateNativePreparationError
+            >(),
+          )
+        : Option.none<
+            Deferred.Deferred<
+              void,
+              DesktopUpdaterReportedError | DesktopUpdateNativePreparationError
+            >
+          >();
     yield* Ref.set(nativePreparationDeferredRef, nativePreparationDeferred);
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
@@ -451,6 +474,14 @@ export const make = Effect.gen(function* () {
             return { accepted: true, completed: false };
           },
         ),
+        DesktopUpdateNativePreparationError: Effect.fn(
+          "desktop.updates.handleNativePreparationInvariantFailure",
+        )(function* (error) {
+          yield* updateState((current) =>
+            reduceDesktopUpdateStateOnDownloadFailure(current, error.message),
+          );
+          return { accepted: true, completed: false };
+        }),
       }),
       Effect.onInterrupt(() =>
         updateState((current) => (current.status === "downloading" ? state : current)).pipe(
@@ -822,9 +853,8 @@ export const make = Effect.gen(function* () {
       const pendingVersion = yield* Ref.get(nativePreparationVersionRef);
       const version = Option.getOrUndefined(pendingVersion) ?? state.availableVersion;
       if (version === null) {
-        const error = new DesktopUpdaterReportedError({
-          operation: "download",
-          cause: new Error("Native macOS update became ready without a version."),
+        const error = new DesktopUpdateNativePreparationError({
+          stage: "resolve-version",
         });
         yield* Deferred.fail(nativePreparationDeferred.value, error);
         yield* logUpdaterWarning(

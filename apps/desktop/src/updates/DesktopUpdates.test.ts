@@ -277,6 +277,9 @@ describe("DesktopUpdates", () => {
       operation: "download",
       cause,
     });
+    const nativePreparationError = new DesktopUpdates.DesktopUpdateNativePreparationError({
+      stage: "resolve-version",
+    });
     const unexpectedActionError = new DesktopUpdates.DesktopUpdateUnexpectedActionError({
       action: "install",
       cause,
@@ -291,6 +294,12 @@ describe("DesktopUpdates", () => {
     assert.strictEqual(reportedError.cause, cause);
     assert.equal(reportedError.operation, "download");
     assert.equal(reportedError.message, "Desktop updater download operation reported an error.");
+    assert.equal(nativePreparationError.stage, "resolve-version");
+    assert.equal(
+      nativePreparationError.message,
+      "Native macOS update preparation completed without an update version.",
+    );
+    assert.notProperty(nativePreparationError, "cause");
     assert.strictEqual(unexpectedActionError.cause, cause);
     assert.equal(unexpectedActionError.action, "install");
     assert.equal(
@@ -483,7 +492,7 @@ describe("DesktopUpdates", () => {
           assert.equal(result.state.errorContext, "download");
           assert.equal(
             result.state.message,
-            "Desktop updater download operation reported an error.",
+            "Native macOS update preparation completed without an update version.",
           );
         }),
       ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
