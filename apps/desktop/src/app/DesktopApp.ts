@@ -204,7 +204,7 @@ const bootstrap = Effect.gen(function* () {
     // app feels responsive instead of presenting no window until WSL is ready.
     // (Dual mode opens fast off the Windows primary, so no splash there.)
     if (settings.wslOnly === true && settings.wslBackendEnabled === true) {
-      yield* desktopWindow.showConnectingSplash;
+      yield* desktopWindow.showConnectingSplash("wsl");
     }
     yield* primaryBackend.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
@@ -256,7 +256,7 @@ const startup = Effect.gen(function* () {
     ),
   );
   if (isUpdateRelaunch) {
-    yield* desktopWindow.showConnectingSplash;
+    yield* desktopWindow.showConnectingSplash("update-relaunch");
   }
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
 }).pipe(Effect.withSpan("desktop.startup"));

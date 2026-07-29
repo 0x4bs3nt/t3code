@@ -808,6 +808,16 @@ export const make = Effect.gen(function* () {
 
   const handleNativeUpdateDownloaded = Effect.fn("desktop.updates.handleNativeUpdateDownloaded")(
     function* () {
+      const downloadInFlight = yield* Ref.get(updateDownloadInFlightRef);
+      const nativePreparationDeferred = yield* Ref.get(nativePreparationDeferredRef);
+      if (!downloadInFlight || Option.isNone(nativePreparationDeferred)) {
+        yield* logUpdaterInfo("ignoring native macOS update readiness outside active download");
+        return;
+      }
+      if (yield* Deferred.isDone(nativePreparationDeferred.value)) {
+        yield* logUpdaterInfo("ignoring duplicate native macOS update readiness");
+        return;
+      }
       const state = yield* Ref.get(updateStateRef);
       const pendingVersion = yield* Ref.get(nativePreparationVersionRef);
       const version = Option.getOrUndefined(pendingVersion) ?? state.availableVersion;
@@ -816,20 +826,26 @@ export const make = Effect.gen(function* () {
           operation: "download",
           cause: new Error("Native macOS update became ready without a version."),
         });
-        const nativePreparationDeferred = yield* Ref.get(nativePreparationDeferredRef);
-        if (Option.isSome(nativePreparationDeferred)) {
-          yield* Deferred.fail(nativePreparationDeferred.value, error);
-        }
+        yield* Deferred.fail(nativePreparationDeferred.value, error);
         yield* logUpdaterWarning(
           "native macOS update became ready without an available update version",
         );
         return;
       }
-      yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, version));
-      const nativePreparationDeferred = yield* Ref.get(nativePreparationDeferredRef);
-      if (Option.isSome(nativePreparationDeferred)) {
-        yield* Deferred.succeed(nativePreparationDeferred.value, undefined);
+      const transitionedToDownloaded = yield* Ref.modify(updateStateRef, (current) => {
+        if (current.errorContext === "download") {
+          return [false, current] as const;
+        }
+        return [true, reduceDesktopUpdateStateOnDownloadComplete(current, version)] as const;
+      });
+      if (!transitionedToDownloaded) {
+        yield* logUpdaterInfo("ignoring native macOS update readiness after download failure", {
+          version,
+        });
+        return;
       }
+      yield* emitState;
+      yield* Deferred.succeed(nativePreparationDeferred.value, undefined);
       yield* logUpdaterInfo("native macOS update prepared", { version });
     },
   );

@@ -29,6 +29,7 @@ interface UpdatesHarnessOptions {
     void,
     ElectronUpdater.ElectronUpdaterCheckForUpdatesError
   >;
+  readonly downloadUpdate?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterDownloadUpdateError>;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
   readonly stopBackend?: Effect.Effect<void>;
@@ -93,7 +94,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     checkForUpdates: Effect.sync(() => {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
-    downloadUpdate: Effect.void,
+    downloadUpdate: options.downloadUpdate ?? Effect.void,
     quitAndInstall: () =>
       Effect.sync(() => {
         quitAndInstallCount += 1;
@@ -489,6 +490,38 @@ describe("DesktopUpdates", () => {
     },
   );
 
+  it.effect("ignores native readiness after a macOS download failure", () => {
+    const downloadError = new ElectronUpdater.ElectronUpdaterDownloadUpdateError({
+      channel: null,
+      cause: new Error("simulated download failure"),
+    });
+    const harness = makeHarness({
+      platform: "darwin",
+      downloadUpdate: Effect.fail(downloadError),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const result = yield* updates.download;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+        const failedState = yield* updates.getState;
+        assert.equal(failedState.errorContext, "download");
+        assert.isTrue(failedState.canRetry);
+
+        harness.emit("native-update-downloaded");
+        yield* flushCallbacks;
+
+        assert.deepEqual(yield* updates.getState, failedState);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("only force-destroys windows for the Windows installer", () =>
     Effect.gen(function* () {
       for (const platform of ["darwin", "win32", "linux"] as const) {
@@ -497,10 +530,21 @@ describe("DesktopUpdates", () => {
           Effect.gen(function* () {
             const updates = yield* DesktopUpdates.DesktopUpdates;
             yield* updates.configure;
-            harness.emit("update-downloaded", { version: "1.2.4" });
+            harness.emit("update-available", { version: "1.2.4" });
+            yield* flushCallbacks;
+
             if (platform === "darwin") {
+              const downloadFiber = yield* updates.download.pipe(Effect.forkScoped);
+              yield* flushCallbacks;
+              harness.emit("update-downloaded", { version: "1.2.4" });
               yield* flushCallbacks;
               harness.emit("native-update-downloaded");
+              const downloadResult = yield* Fiber.join(downloadFiber);
+              assert.isTrue(downloadResult.completed);
+            } else {
+              const downloadResult = yield* updates.download;
+              assert.isTrue(downloadResult.completed);
+              harness.emit("update-downloaded", { version: "1.2.4" });
             }
             yield* flushCallbacks;
 
