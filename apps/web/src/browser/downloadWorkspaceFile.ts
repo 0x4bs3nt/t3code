@@ -19,6 +19,8 @@ export function startBrowserDownload(url: string, fileName: string): void {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = fileName;
+  anchor.target = "_blank";
+  anchor.rel = "noopener";
   anchor.hidden = true;
   document.body.appendChild(anchor);
   anchor.click();

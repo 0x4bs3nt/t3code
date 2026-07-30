@@ -1,16 +1,50 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { downloadWorkspaceFile } from "./downloadWorkspaceFile";
+import { downloadWorkspaceFile, startBrowserDownload } from "./downloadWorkspaceFile";
 
 const threadRef = {
   environmentId: EnvironmentId.make("environment-1"),
   threadId: ThreadId.make("thread-1"),
 };
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("downloadWorkspaceFile", () => {
+  it("keeps fallback navigation out of the current app", () => {
+    const anchor = {
+      click: vi.fn(),
+      download: "",
+      hidden: false,
+      href: "",
+      rel: "",
+      remove: vi.fn(),
+      target: "",
+    };
+    const appendChild = vi.fn();
+    vi.stubGlobal("document", {
+      body: { appendChild },
+      createElement: vi.fn(() => anchor),
+    });
+
+    startBrowserDownload("https://environment.example/api/assets/token/build.zip", "build.zip");
+
+    expect(anchor).toMatchObject({
+      download: "build.zip",
+      hidden: true,
+      href: "https://environment.example/api/assets/token/build.zip",
+      rel: "noopener",
+      target: "_blank",
+    });
+    expect(appendChild).toHaveBeenCalledWith(anchor);
+    expect(anchor.click).toHaveBeenCalledOnce();
+    expect(anchor.remove).toHaveBeenCalledOnce();
+  });
+
   it("requests an attachment URL and starts the browser download", async () => {
     const createAssetUrl = vi.fn().mockResolvedValue(
       AsyncResult.success({
