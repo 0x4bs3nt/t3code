@@ -274,6 +274,7 @@ export const assetRouteLayer = HttpRouter.add(
       status: 200,
       headers: {
         "Cache-Control": "private, max-age=3600",
+        ...(asset.disposition === "attachment" ? { "Content-Disposition": "attachment" } : {}),
         "X-Content-Type-Options": "nosniff",
       },
     }).pipe(
