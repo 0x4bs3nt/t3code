@@ -81,7 +81,7 @@ update fails. Download the new `.deb` and install it the same way.
 ### Nix (nixpkgs)
 
 T3 Code is maintained in [nixpkgs](https://github.com/NixOS/nixpkgs/tree/nixos-unstable/pkgs/by-name/t3/t3code).
-The command above installs from `nixos-unstable` and requires Nix with
+The command above installs from `nixos-unstable` and requires Nix 2.30 or later with
 `nix-command` and `flakes` enabled. Launch the desktop app with `t3code-desktop`;
 the package also includes the `t3` command.
 
@@ -95,8 +95,9 @@ environment.systemPackages = [ pkgs.t3code ];
 Apply the change with `sudo nixos-rebuild switch`. For Home Manager, add
 `pkgs.t3code` to `home.packages` and run `home-manager switch`.
 
-Update through Nix: upgrade your profile, or update your configuration's nixpkgs
-input or channel and rebuild. Nix manages both the desktop app and the bundled
+Update a profile installation with `nix profile upgrade t3code`. For NixOS or
+Home Manager, update your configuration's nixpkgs input or channel and rebuild.
+Nix manages both the desktop app and the bundled
 `t3` command; use Nix to update them instead of the in-app updater or `t3 update`.
 
 ### The `t3` command
